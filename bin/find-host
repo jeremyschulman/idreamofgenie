@@ -1,0 +1,156 @@
+#!/usr/bin/env python
+#
+#   Copyright 2019 Jeremy Schulman, nwkautomaniac@gmail.com
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+"""
+This script is used to locate an end Host that is attached on a layer 2 (VLAN)
+network.  The User is expected to provide the host IP address and the name
+of a Cisco device to start the search on.  For example:
+
+$ find-host -i 192.168.100.171 -o switch22 -F
+
+2019-10-22 18:57:57,871:INFO:Starting search for host IP 192.168.100.171 ...
+2019-10-22 18:57:57,872:INFO:Connecting to device: switch22
+2019-10-22 18:58:02,860:INFO:Ping host IP: 192.168.100.171
+2019-10-22 18:58:06,238:INFO:Found MAC address 0050.c2ab.abab on VLAN 99
+2019-10-22 18:58:06,753:INFO:Following switch22 interface Eth1/1 to next device: switch21
+2019-10-22 18:58:13,569:INFO:Host IP 192.168.100.171 macaddr 0050.c2ab.abab last found on switch39:Gi1/1/19
+2019-10-22 18:58:13,569:INFO:No next device available.
+2019-10-22 18:58:13,570:INFO:Building configuration...
+
+Current configuration : 170 bytes
+!
+interface GigabitEthernet1/1/19
+ description I-am-your-phone
+ switchport access vlan 99
+ switchport mode access
+ spanning-tree portfast
+ spanning-tree bpduguard enable
+end
+"""
+import sys
+from ipaddress import ip_address
+import logging
+
+from first import first
+import click
+import idreamofgenie
+
+log = logging.getLogger(__name__)
+
+
+def setup_log():
+    log.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(message)s')
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(formatter)
+    log.addHandler(ch)
+
+
+setup_log()
+
+
+@click.command()
+@click.option('-i', '--ipaddr', required=True,
+              help='IP address of the target host')
+@click.option('-o', '--origin-device', required=True,
+              help='start scan from this Cisco device')
+@click.option('-n', '--os-name', type=click.Choice(['ios', 'iosxe', 'iosxr', 'nxos']),
+              help='Cisco network OS name')
+@click.option('-m', '--macaddr',
+              help='MAC address of the target host')
+@click.option('-F', '--follow', is_flag=True,
+              help='Always follow next device, no prompt')
+def find_host(ipaddr, macaddr, origin_device, os_name, follow):
+
+    try:
+        origin_device = ip_address(origin_device)
+    except ValueError:
+        pass
+
+    log.info(f"Starting search for host IP {ipaddr} ... ")
+    log.info(f"Connecting to device: {origin_device}")
+    device = idreamofgenie.Device(origin_device, os_name=os_name)
+
+    log.info(f"Ping host IP: {ipaddr}")
+    if not idreamofgenie.ping(device, ipaddr):
+        log.error(f"Host IP {ipaddr} unreachable, exit.")
+        sys.exit(1)
+
+    hunt_end_host(device, ipaddr, macaddr, follow)
+
+
+def hunt_end_host(device, ipaddr, macaddr, follow, vlan_id=None, ttl=4):
+    if not ttl:
+        log.error(f"Count not find Host IP {ipaddr} in TTL, exit.")
+        sys.exit(2)
+
+    if not macaddr:
+        found = idreamofgenie.find_macaddr_by_arp(device, ipaddr)
+        if not found:
+            log.error(f"Could not find host MAC address from IP, exit.")
+            sys.exit(2)
+        macaddr = found['macaddr']
+        found_vlan = found['interface'].lower().split('vlan')
+        if len(found_vlan) > 1:
+            vlan_id = found_vlan[1]
+
+        if vlan_id:
+            log.info(f"Found MAC address {macaddr} on VLAN {vlan_id}")
+
+    via_iface = idreamofgenie.find_macaddr_via_iface(device, macaddr)
+    iface_config = device.execute(f'show run int {via_iface}')
+
+    if follow is False:
+        keep_hunting = click.confirm(f"Found MAC address {macaddr} on interface {via_iface}\n"
+                                     f"{iface_config}\n\n"
+                                     "Continue hunting?")
+    else:
+        keep_hunting = True
+
+    if not keep_hunting:
+        log.info(f"Host IP {ipaddr} macaddr {macaddr} last found on {via_iface}")
+        log.info(iface_config)
+        sys.exit(0)
+
+    # if the interface is a port-channel, then we need to obtain an actual
+    # physical interface since we need to follow the links to the next device
+    # in the hunt.
+
+    if via_iface.lower().startswith('po'):
+        members = idreamofgenie.find_portchan_members(device, via_iface)
+        follow_iface = first(members)
+        if not follow_iface:
+            log.error(f"Could not follow Port-channel {via_iface}, no physical ports found")
+            sys.exit(2)
+    else:
+        follow_iface = via_iface
+
+    next_device = idreamofgenie.find_cdp_neighbor(device, follow_iface)
+    if not next_device:
+        log.info(f"Host IP {ipaddr} macaddr {macaddr} last found on {device.name}:{via_iface}")
+        log.info(f"No next device available.")
+        log.info(iface_config)
+        sys.exit(0)
+
+    log.info(f"Following {device.name} interface {follow_iface} to next device: {next_device['device']}")
+    device = idreamofgenie.Device(next_device['device'], os_name=next_device['os_name'])
+
+    hunt_end_host(device, ipaddr=ipaddr, macaddr=macaddr,
+                  vlan_id=vlan_id,
+                  follow=follow, ttl=ttl-1)
+
+
+if __name__ == "__main__":
+    find_host()
