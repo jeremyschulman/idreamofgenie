@@ -15,8 +15,13 @@
 #   limitations under the License.
 """
 This script is used to locate an end Host that is attached on a layer 2 (VLAN)
-network.  The User is expected to provide the host IP address and the name
-of a Cisco device to start the search on.  For example:
+network.  Prior to use the User must export the following environment variables:
+
+   * PYATS_USERNAME=<network-device login user-name>
+   * PYATS_PASSWORD=<login user-password>
+
+The User is expected to provide the host IP address and the name of a Cisco
+device to start the search on.  For example:
 
 $ find-host -i 192.168.100.171 -o switch22 -F
 
