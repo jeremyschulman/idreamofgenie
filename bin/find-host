@@ -20,14 +20,14 @@ of a Cisco device to start the search on.  For example:
 
 $ find-host -i 192.168.100.171 -o switch22 -F
 
-2019-10-22 18:57:57,871:INFO:Starting search for host IP 192.168.100.171 ...
-2019-10-22 18:57:57,872:INFO:Connecting to device: switch22
-2019-10-22 18:58:02,860:INFO:Ping host IP: 192.168.100.171
-2019-10-22 18:58:06,238:INFO:Found MAC address 0050.c2ab.abab on VLAN 99
-2019-10-22 18:58:06,753:INFO:Following switch22 interface Eth1/1 to next device: switch21
-2019-10-22 18:58:13,569:INFO:Host IP 192.168.100.171 macaddr 0050.c2ab.abab last found on switch39:Gi1/1/19
-2019-10-22 18:58:13,569:INFO:No next device available.
-2019-10-22 18:58:13,570:INFO:Building configuration...
+INFO:Starting search for host IP 192.168.100.171 ...
+INFO:Connecting to device: switch22
+INFO:Ping host IP: 192.168.100.171
+INFO:Found MAC address 0050.c2ab.abab on VLAN 99
+INFO:Following switch22 interface Eth1/1 to next device: switch21
+INFO:Host IP 192.168.100.171 macaddr 0050.c2ab.abab last found on switch39:Gi1/1/19
+INFO:No next device available.
+INFO:Building configuration...
 
 Current configuration : 170 bytes
 !
@@ -57,6 +57,10 @@ log = logging.getLogger(__name__)
 
 
 def setup_log():
+    """
+    Using a log for processing/progress.  You can chance the format and controls
+    in this function if you want to customize the logging output.
+    """
     log.setLevel(logging.INFO)
     # formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(message)s')
     formatter = logging.Formatter('%(levelname)s:%(message)s')
@@ -68,14 +72,34 @@ def setup_log():
 setup_log()
 
 
+# -----------------------------------------------------------------------------
+#
+#                       Click - User Interface Helpers
+#
+# -----------------------------------------------------------------------------
+
 def validate_macaddr(ctx, param, value):
-    # no matter what MAC address format was provided by user, extract out only
-    # the valid alpha-num octets into a single string.  ensure that the result
-    # is the proper length.
+    """
+    This is a Click callback that will validate the MAC address provided by the
+    User.  No matter what MAC address format was provided by user, extract out
+    only the valid alpha-num octets into a single string.  Ensure that the
+    result is the proper length.
+
+    Parameters
+    ----------
+    ctx : click.Context
+    param : click.Option - the parameter (macaddr)
+    value : str - the MAC address provided by the User
+
+    Returns
+    -------
+    str
+        The MAC address in Cisco format : "aaaa.bbbb.ccccc"
+    """
     if not value:
         return value
 
-    nibs = re.sub(r'[^0-9,a-f,A-F]', '', value.lower())
+    nibs = re.sub(r'[^0-9a-fA-F]', '', value.lower())
 
     if len(nibs) != 12:
         raise click.BadParameter('macaddr must be 6 octets in length')
@@ -85,6 +109,21 @@ def validate_macaddr(ctx, param, value):
 
 
 def validate_ipaddr(ctx, param, value):
+    """
+    This is a Click callback that will validate the IP address provided by the
+    User.
+
+    Parameters
+    ----------
+    ctx : click.Context
+    param : click.Option - the parameter (ipaddr)
+    value : str - the IP address provided by the User
+
+    Returns
+    -------
+    str
+        The IP address
+    """
     if not value:
         return value
 
@@ -95,6 +134,12 @@ def validate_ipaddr(ctx, param, value):
 
     return value
 
+
+# -----------------------------------------------------------------------------
+#
+#                       Click - Command Line Interface
+#
+# -----------------------------------------------------------------------------
 
 @click.command()
 @click.option('-o', '--origin-device', required=True,
@@ -110,10 +155,27 @@ def validate_ipaddr(ctx, param, value):
 @click.option('-F', '--follow', is_flag=True,
               help='Always follow next device, no prompt')
 def find_host(ipaddr, macaddr, origin_device, os_name, follow):
+    """
+    This function is called via Click as the main CLI function.  The primary
+    purpose is to ensure the User options are valid and then execute the
+    code to find the host, traversing network devices starting at the 'origin switch'.
+
+    Parameters
+    ----------
+    ipaddr : str - target Host IP address
+    macaddr : str - target Host MAC address
+    origin_device : str - origin Cisco switch
+    os_name : str - origin switch network OS name
+    follow : bool - auto-follow links
+    """
 
     if not any((ipaddr, macaddr)):
         log.error("Required at least one of: [--ipaddr, --macaddr]")
         sys.exit(1)
+
+    # check if the origin device was passed as an IP address rather than a
+    # DNS/hostname; if it is not an IP address, then this function will attempt
+    # to use the User provided value as a DNS/hostname.
 
     try:
         origin_device = ip_address(origin_device)
@@ -131,6 +193,10 @@ def find_host(ipaddr, macaddr, origin_device, os_name, follow):
     if macaddr:
         log.info(f"Searching for host with MAC address: {macaddr}")
 
+    # if the target Host IP address was provided, execute a ping test to ensure
+    # (a) that it is reachable, and (b) so that the target Host MAC address
+    # will be available in the network device ARP tables.
+
     if ipaddr:
         log.info(f"Searching for host with IP address: {ipaddr}")
         log.info(f"Ping host IP: {ipaddr}")
@@ -138,13 +204,54 @@ def find_host(ipaddr, macaddr, origin_device, os_name, follow):
             log.error(f"Host IP {ipaddr} unreachable, exit.")
             sys.exit(1)
 
+    # Start the hunt for the target device!  This function does not return
+    # here; rather will execute the search and then exit the program using
+    # sys.exit().
+
     hunt_end_host(device, ipaddr, macaddr, follow)
 
 
+# -----------------------------------------------------------------------------
+#
+#                      Finding the Target Host Device
+#
+# -----------------------------------------------------------------------------
+
 def hunt_end_host(device, ipaddr, macaddr, follow, vlan_id=None, ttl=4):
+    """
+    This function will examine the current `device` to see if the target can be
+    found on a local interface.  If it is not on a local interface, then this
+    function will connect to the next device where the Host was last seen (via
+    ARP / MAC table / CDP), and then recursively call this function to continue
+    the search.
+
+    This function does not return, rather it will call sys.exit().
+
+    Notes
+    -----
+    This function provides a Time-To-Live (ttl) counter that defaults to 4.
+    This means if more than four devices are searched, and the Host is still
+    not found, then this program will exit with an error.
+
+    Parameters
+    ----------
+    device : Device - current device instance
+    ipaddr : str|None - Host IP address
+    macaddr : str|None - Host MAC address
+    follow : bool - auto follow CDP links
+    vlan_id : str|None - Host MAC found on VLAN ID
+    ttl : int - time to live value
+    """
+
     if not ttl:
         log.error(f"Count not find Host IP {ipaddr} in TTL, exit.")
         sys.exit(2)
+
+    # If the Host MAC address is not known, then try to find it using an ARP
+    # lookup using the Host IP address.  If the MAC address is not found, then
+    # sys.exit with error.  If the MAC address is found, and the associated
+    # interface is a VLAN, then set the vlan_id value which we use for
+    # reporting purposes.
 
     if not macaddr:
         found = idreamofgenie.find_macaddr_by_arp(device, ipaddr)
@@ -159,14 +266,27 @@ def hunt_end_host(device, ipaddr, macaddr, follow, vlan_id=None, ttl=4):
         if vlan_id:
             log.info(f"Found MAC address {macaddr} on VLAN {vlan_id}")
 
+    # If the Host IP address is not known (User called with just --macaddr),
+    # then try to find the IP address using the provided MAC address.  If it is
+    # not found, we do not exit/error; but if it is found, then we save this
+    # for further use.
+
     if not ipaddr:
         found = idreamofgenie.find_ipaddr_by_arp(device, macaddr)
         if found:
             log.info(f"Found IP address {ipaddr} for MAC address {macaddr}")
             ipaddr = found['ipaddr']
 
+    # using the Host MAC address locate the device interface where it was last
+    # seen using the mac address table.  From this via interface, gather the
+    # current interface configuration as it will be presented to the User.
+
     via_iface = idreamofgenie.find_macaddr_via_iface(device, macaddr)
     iface_config = device.execute(f'show run int {via_iface}')
+
+    # if the auto follow feature is disabled, show the User the current via
+    # interface configuration and ask them if they want to continue searching.
+    # if the auto follow feature is enabled, skip the User prompt.
 
     if follow is False:
         keep_hunting = click.confirm(f"Found MAC address {macaddr} on interface {via_iface}\n"
@@ -180,7 +300,7 @@ def hunt_end_host(device, ipaddr, macaddr, follow, vlan_id=None, ttl=4):
         log.info(iface_config)
         sys.exit(0)
 
-    # if the interface is a port-channel, then we need to obtain an actual
+    # if the via interface is a port-channel, then we need to obtain an actual
     # physical interface since we need to follow the links to the next device
     # in the hunt.
 
@@ -193,12 +313,20 @@ def hunt_end_host(device, ipaddr, macaddr, follow, vlan_id=None, ttl=4):
     else:
         follow_iface = via_iface
 
+    # Using the via interface and CDP, find the next Cisco device to search on.
+    # If the next device does not have an os_name value, it means the next
+    # device is not a Cisco device.
+
     next_device = idreamofgenie.find_cdp_neighbor(device, follow_iface)
     if not next_device or not next_device['os_name']:
         log.info(f"Host IP {ipaddr} macaddr {macaddr} last found on {device.name}:{via_iface}")
         log.info(f"No next device available.")
         log.info(iface_config)
         sys.exit(0)
+
+    # At this point there is valid next Cisco device to search, update the User
+    # and attempt to connect to that device.  Once connected, recursively call
+    # this (hunt_end_host) function.
 
     next_name = next_device['device']
     log.info(f"Following {device.name} interface {follow_iface} to next device: {next_name}")
@@ -214,6 +342,12 @@ def hunt_end_host(device, ipaddr, macaddr, follow, vlan_id=None, ttl=4):
                   vlan_id=vlan_id,
                   follow=follow, ttl=ttl-1)
 
+
+# -----------------------------------------------------------------------------
+#
+#                                   MAIN
+#
+# -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
     try:
