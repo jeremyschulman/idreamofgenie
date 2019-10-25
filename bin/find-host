@@ -42,9 +42,15 @@ end
 import sys
 from ipaddress import ip_address
 import logging
+import re
+import textwrap
 
 from first import first
 import click
+
+# unicon part of pyATS software
+from unicon.core.errors import ConnectionError
+
 import idreamofgenie
 
 log = logging.getLogger(__name__)
@@ -52,7 +58,8 @@ log = logging.getLogger(__name__)
 
 def setup_log():
     log.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(message)s')
+    # formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(message)s')
+    formatter = logging.Formatter('%(levelname)s:%(message)s')
     ch = logging.StreamHandler(sys.stdout)
     ch.setFormatter(formatter)
     log.addHandler(ch)
@@ -61,32 +68,75 @@ def setup_log():
 setup_log()
 
 
+def validate_macaddr(ctx, param, value):
+    # no matter what MAC address format was provided by user, extract out only
+    # the valid alpha-num octets into a single string.  ensure that the result
+    # is the proper length.
+    if not value:
+        return value
+
+    nibs = re.sub(r'[^0-9,a-f,A-F]', '', value.lower())
+
+    if len(nibs) != 12:
+        raise click.BadParameter('macaddr must be 6 octets in length')
+
+    # return the macaddr value using the Cisco format of "aaaa.bbbb.cccc"
+    return '.'.join(textwrap.wrap(nibs, 4))
+
+
+def validate_ipaddr(ctx, param, value):
+    if not value:
+        return value
+
+    try:
+        ip_address(value)
+    except ValueError:
+        click.BadParameter(f'`{value}` is not a valid IP address')
+
+    return value
+
+
 @click.command()
-@click.option('-i', '--ipaddr', required=True,
-              help='IP address of the target host')
 @click.option('-o', '--origin-device', required=True,
-              help='start scan from this Cisco device')
+              help='Start find from this Cisco device')
 @click.option('-n', '--os-name', type=click.Choice(['ios', 'iosxe', 'iosxr', 'nxos']),
-              help='Cisco network OS name')
+              help='Origin device NOS name (if known)')
+@click.option('-i', '--ipaddr',
+              callback=validate_ipaddr,
+              help='Target host IP address')
 @click.option('-m', '--macaddr',
-              help='MAC address of the target host')
+              callback=validate_macaddr,
+              help='Target host MAC address')
 @click.option('-F', '--follow', is_flag=True,
               help='Always follow next device, no prompt')
 def find_host(ipaddr, macaddr, origin_device, os_name, follow):
+
+    if not any((ipaddr, macaddr)):
+        log.error("Required at least one of: [--ipaddr, --macaddr]")
+        sys.exit(1)
 
     try:
         origin_device = ip_address(origin_device)
     except ValueError:
         pass
 
-    log.info(f"Starting search for host IP {ipaddr} ... ")
-    log.info(f"Connecting to device: {origin_device}")
-    device = idreamofgenie.Device(origin_device, os_name=os_name)
+    try:
+        log.info(f"Connecting to device: {origin_device}")
+        device = idreamofgenie.Device(origin_device, os_name=os_name)
 
-    log.info(f"Ping host IP: {ipaddr}")
-    if not idreamofgenie.ping(device, ipaddr):
-        log.error(f"Host IP {ipaddr} unreachable, exit.")
+    except ConnectionError:
+        log.error(f"Failed to connect to network device: {origin_device}")
         sys.exit(1)
+
+    if macaddr:
+        log.info(f"Searching for host with MAC address: {macaddr}")
+
+    if ipaddr:
+        log.info(f"Searching for host with IP address: {ipaddr}")
+        log.info(f"Ping host IP: {ipaddr}")
+        if not idreamofgenie.ping(device, ipaddr):
+            log.error(f"Host IP {ipaddr} unreachable, exit.")
+            sys.exit(1)
 
     hunt_end_host(device, ipaddr, macaddr, follow)
 
@@ -108,6 +158,12 @@ def hunt_end_host(device, ipaddr, macaddr, follow, vlan_id=None, ttl=4):
 
         if vlan_id:
             log.info(f"Found MAC address {macaddr} on VLAN {vlan_id}")
+
+    if not ipaddr:
+        found = idreamofgenie.find_ipaddr_by_arp(device, macaddr)
+        if found:
+            log.info(f"Found IP address {ipaddr} for MAC address {macaddr}")
+            ipaddr = found['ipaddr']
 
     via_iface = idreamofgenie.find_macaddr_via_iface(device, macaddr)
     iface_config = device.execute(f'show run int {via_iface}')
@@ -138,14 +194,21 @@ def hunt_end_host(device, ipaddr, macaddr, follow, vlan_id=None, ttl=4):
         follow_iface = via_iface
 
     next_device = idreamofgenie.find_cdp_neighbor(device, follow_iface)
-    if not next_device:
+    if not next_device or not next_device['os_name']:
         log.info(f"Host IP {ipaddr} macaddr {macaddr} last found on {device.name}:{via_iface}")
         log.info(f"No next device available.")
         log.info(iface_config)
         sys.exit(0)
 
-    log.info(f"Following {device.name} interface {follow_iface} to next device: {next_device['device']}")
-    device = idreamofgenie.Device(next_device['device'], os_name=next_device['os_name'])
+    next_name = next_device['device']
+    log.info(f"Following {device.name} interface {follow_iface} to next device: {next_name}")
+
+    try:
+        device = idreamofgenie.Device(next_name, os_name=next_device['os_name'])
+
+    except ConnectionError:
+        log.error(f"Failed to connect to network device: {next_name}")
+        sys.exit(1)
 
     hunt_end_host(device, ipaddr=ipaddr, macaddr=macaddr,
                   vlan_id=vlan_id,
@@ -153,4 +216,9 @@ def hunt_end_host(device, ipaddr, macaddr, follow, vlan_id=None, ttl=4):
 
 
 if __name__ == "__main__":
-    find_host()
+    try:
+        find_host()
+
+    except Exception as exc:
+        log.error(f"Failed to find target, error: {str(exc)}")
+        sys.exit(1)

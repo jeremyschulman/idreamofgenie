@@ -36,4 +36,7 @@ setup(
     author='Jeremy Schulman',
     packages=find_packages(),
     install_requires=requirements(),
+    scripts=[
+        'bin/find-host'
+    ]
 )

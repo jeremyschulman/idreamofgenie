@@ -25,6 +25,7 @@ from unicon.core.errors import SubCommandFailure
 __all__ = [
     'find_os_name',
     'find_cdp_neighbor',
+    'find_ipaddr_by_arp',
     'find_macaddr_by_arp',
     'find_macaddr_via_iface',
     'find_portchan_members',
@@ -46,9 +47,22 @@ def find_macaddr_by_arp(dev, ipaddr):
     if not cli_text or 'Invalid' in cli_text:
         return None
 
-    found_ipaddr, timestamp, macaddr, ifname = re.split('\s+', cli_text)
+    found_ipaddr, timestamp, macaddr, ifname = re.split(r'\s+', cli_text)
     return {
         'macaddr': macaddr,
+        'interface': ifname
+    }
+
+
+def find_ipaddr_by_arp(dev, macaddr):
+    """ '10.9.2.171  00:13:37  0050.abcd.de17  Vlan18' """
+    cli_text = dev.execute(f'show ip arp | inc {macaddr}')
+    if not cli_text or 'Invalid' in cli_text:
+        return None
+
+    ipaddr, timestamp, macaddr, ifname = re.split(r'\s+', cli_text)
+    return {
+        'ipaddr': ipaddr,
         'interface': ifname
     }
 
@@ -69,7 +83,7 @@ def find_portchan_members(dev, ifname):
     if not cli_text:
         return None
 
-    members = re.split('\s+', cli_text)[4:]
+    members = re.split(r'\s+', cli_text)[4:]
     return [member.split('(')[0] for member in members]
 
 
@@ -77,9 +91,19 @@ def find_os_name(dev=None, content=None):
     if not content:
         content = dev.execute('show version')
 
-    os_name = first(re.findall('(IOSXE)|(NX-OS)|(IOS)', content, re.M)[0])
+    # look for specific Cisco OS names.  If one is not found, it means that the
+    # CDP neighbor is not a recognized device, and return None.  If it is
+    # recognized then the re will return a list, for which we need to extract
+    # the actual found NOS name; thus using the first() function twice.
 
-    # convert OS name from show output to os name required by genie
+    os_name = first(re.findall('(IOSXE)|(NX-OS)|(IOS)', content, re.M))
+    if not os_name:
+        return None
+
+    os_name = first(os_name)
+
+    # convert OS name from show output to os name required by genie, if the OS
+    # is not found, then return None
 
     return {'IOSXE': 'iosxe', 'NX-OS': 'nxos', 'IOS': 'ios'}[os_name]
 
@@ -95,8 +119,11 @@ def find_cdp_neighbor(dev, ifname):
         if "Total cdp entries displayed : 0" in cli_text:
             return None
 
-    device = re.findall('Device ID:(.*)$', cli_text, re.M)[0].split('.')[0]
-    platform = re.findall('Platform: (.*),', cli_text, re.M)[0]
+    device = first(re.findall('Device ID:(.*)$', cli_text, re.M))
+    if device and '.' in device:
+        device = first(device.split('.'))
+
+    platform = first(re.findall('Platform: (.*),', cli_text, re.M))
     os_name = find_os_name(content=cli_text)
 
     return {
@@ -104,4 +131,3 @@ def find_cdp_neighbor(dev, ifname):
         'platform': platform,
         'os_name': os_name
     }
-
