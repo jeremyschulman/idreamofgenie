@@ -15,7 +15,7 @@
 
 from setuptools import setup, find_packages
 
-package_version = '0.1.0'
+package_version = '0.1.1'
 package_name = 'idreamofgenie'
 
 
@@ -35,8 +35,22 @@ setup(
     long_description_content_type="text/markdown",
     author='Jeremy Schulman',
     packages=find_packages(),
+    url='https://github.com/jeremyschulman/idreamofgenie',
     install_requires=requirements(),
     scripts=[
         'bin/find-host'
-    ]
+    ],
+    classifiers=[
+        'Development Status :: 4 - Beta',
+        'Intended Audience :: Developers',
+        'Intended Audience :: Information Technology',
+        'Intended Audience :: System Administrators',
+        'License :: OSI Approved :: Apache Software License',
+        'Operating System :: OS Independent',
+        'Programming Language :: Python',
+        'Programming Language :: Python :: 3.6',
+        'Topic :: Software Development :: Libraries',
+        'Topic :: Software Development :: Libraries :: Python Modules',
+        'Topic :: System :: Networking'
+    ],
 )
