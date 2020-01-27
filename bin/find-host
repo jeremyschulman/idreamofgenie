@@ -193,7 +193,7 @@ def find_host(ipaddr, macaddr, origin_device, os_name, follow):
 
     except ConnectionError:
         log.error(f"Failed to connect to network device: {origin_device}")
-        sys.exit(1)
+        sys.exit(0)
 
     if macaddr:
         log.info(f"Searching for host with MAC address: {macaddr}")
@@ -207,7 +207,7 @@ def find_host(ipaddr, macaddr, origin_device, os_name, follow):
         log.info(f"Ping host IP: {ipaddr}")
         if not idreamofgenie.ping(device, ipaddr):
             log.error(f"Host IP {ipaddr} unreachable, exit.")
-            sys.exit(1)
+            sys.exit(0)
 
     # Start the hunt for the target device!  This function does not return
     # here; rather will execute the search and then exit the program using
@@ -250,7 +250,7 @@ def hunt_end_host(device, ipaddr, macaddr, follow, vlan_id=None, ttl=4):
 
     if not ttl:
         log.error(f"Count not find Host IP {ipaddr} in TTL, exit.")
-        sys.exit(2)
+        sys.exit(0)
 
     # If the Host MAC address is not known, then try to find it using an ARP
     # lookup using the Host IP address.  If the MAC address is not found, then
@@ -262,7 +262,7 @@ def hunt_end_host(device, ipaddr, macaddr, follow, vlan_id=None, ttl=4):
         found = idreamofgenie.find_macaddr_by_arp(device, ipaddr)
         if not found:
             log.error(f"Could not find host MAC address from IP, exit.")
-            sys.exit(2)
+            sys.exit(0)
         macaddr = found['macaddr']
         found_vlan = found['interface'].lower().split('vlan')
         if len(found_vlan) > 1:
@@ -314,7 +314,7 @@ def hunt_end_host(device, ipaddr, macaddr, follow, vlan_id=None, ttl=4):
         follow_iface = first(members)
         if not follow_iface:
             log.error(f"Could not follow Port-channel {via_iface}, no physical ports found")
-            sys.exit(2)
+            sys.exit(0)
     else:
         follow_iface = via_iface
 
@@ -341,7 +341,7 @@ def hunt_end_host(device, ipaddr, macaddr, follow, vlan_id=None, ttl=4):
 
     except ConnectionError:
         log.error(f"Failed to connect to network device: {next_name}")
-        sys.exit(1)
+        sys.exit(0)
 
     hunt_end_host(device, ipaddr=ipaddr, macaddr=macaddr,
                   vlan_id=vlan_id,
@@ -360,4 +360,4 @@ if __name__ == "__main__":
 
     except Exception as exc:
         log.error(f"Failed to find target, error: {str(exc)}")
-        sys.exit(1)
+        sys.exit(0)
